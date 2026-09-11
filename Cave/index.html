@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Cave</title>
+<style>
+  body { margin:0; background:#0f1115; color:#e8eaed;
+         font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:16px; }
+  .banner { border-radius:14px; padding:28px 20px; text-align:center; margin-bottom:20px; }
+  .open { background:#12472a; border:2px solid #29a35a; }
+  .closed { background:#4a1616; border:2px solid #d9453d; }
+  .banner h1 { margin:0; font-size:34px; letter-spacing:1px; }
+  .banner p { margin:8px 0 0; opacity:.85; }
+  .slate { background:#171a21; border:1px solid #262b36;
+           border-radius:14px; padding:16px; margin-bottom:20px; }
+  .slate-head { display:flex; justify-content:space-between;
+                align-items:baseline; margin-bottom:4px; }
+  .slate-head h2 { margin:0; font-size:18px; }
+  .score { font-size:30px; font-weight:700; }
+  .tier { opacity:.7; font-size:14px; margin-bottom:14px; }
+  .game { display:flex; gap:12px; align-items:center;
+          padding:10px 0; border-top:1px solid #262b36; }
+  .gnum { width:26px; opacity:.5; font-size:13px; }
+  .gmain { flex:1; }
+  .gteams { font-weight:600; }
+  .gmeta { font-size:12px; opacity:.6; margin-top:2px; }
+  .gscore { font-size:20px; font-weight:700; }
+  .tv { background:#1d2029; border-left:3px solid #f0a500;
+        padding:10px 12px; border-radius:8px; margin-bottom:8px; }
+  .tv b { color:#f0a500; }
+  .err { background:#4a1616; padding:14px; border-radius:10px; font-size:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="status"></div>
+  <div id="tvboard"></div>
+  <div id="out">Loading games…</div>
+</div>
+
+<script>
+/* ============================================================
+   EDIT THIS SECTION — everything else you can ignore for now
+   ============================================================ */
+const CAVE = {
+  open: true,
+  message: "Doors at 11am. Bring a chair."
+};
+
+const MY_TEAMS = ["UGA", "PIT"];          // small score bonus, use ESPN abbreviations
+
+const RIVALRIES = [                        // big score bonus
+  ["MICH","OSU"], ["UGA","FLA"], ["ALA","AUB"],
+  ["TEX","OU"],   ["GB","CHI"],  ["DAL","PHI"]
+];
+/* ============================================================ */
+
+
+/* ---------- 1. Scoring ---------- */
+const clamp = (n, lo=0, hi=100) => Math.max(lo, Math.min(hi, n));
+
+function teamStrength(t) {
+  if (t.rank) return clamp(100 - (t.rank - 1) * 3);
+  const g = t.wins + t.losses;
+  return clamp((g ? t.wins / g : 0.5) * 45);
+}
+
+function isRivalry(a, b) {
+  return RIVALRIES.some(p =>
+    (p[0] === a && p[1] === b) || (p[1] === a && p[0] === b));
+}
+
+function scoreGame(g) {
+  const sA = teamStrength(g.home), sB = teamStrength(g.away);
+  const quality = clamp(0.6 * ((sA + sB) / 2) + 0.4 * Math.min(sA, sB));
+
+  const competitiveness = g.spread == null ? 55 : clamp(100 - Math.abs(g.spread) * 7);
+
+  let stakes = 35;
+  if (g.conferenceGame) stakes += 18;
+  if (isRivalry(g.home.abbrev, g.away.abbrev)) stakes += 22;
+  if (g.neutralSite) stakes += 8;
+  if (g.home.rank && g.away.rank) stakes += 15;
+  stakes += Math.min(20, g.week * 1.4);
+  stakes = clamp(stakes);
+
+  const watchability = g.overUnder == null ? 55 : clamp((g.overUnder - 34) * 3.5);
+
+  const hr = g.kickoff ? g.kickoff.getHours() : 13;
+  let scene = 40;
+  if (hr >= 19) scene += 30;
+  else if (hr >= 15) scene += 15;
+  if (/^(ABC|CBS|FOX|NBC|ESPN)$/i.test(g.network)) scene += 25;
+  else if (/ESPN2|FS1|TNT|Peacock|Netflix|Prime/i.test(g.network)) scene += 10;
+  scene = clamp(scene);
+
+  let total = quality*0.30 + competitiveness*0.25 + stakes*0.20
+            + watchability*0.15 + scene*0.10;
+
+  if (MY_TEAMS.includes(g.home.abbrev) || MY_TEAMS.includes(g.away.abbrev)) total += 8;
+
+  g.score = Math.round(clamp(total));
+  return g;
+}
+
+function scoreSlate(games) {
+  if (!games.length) return { score: 0, tier: "No games", games: [] };
+  const sorted = [...games].sort((a,b) => b.score - a.score);
+  const top3 = sorted.slice(0,3);
+  const best = top3[0].score;
+  const avg3 = top3.reduce((s,g) => s + g.score, 0) / top3.length;
+
+  const good = sorted.filter(g => g.score >= 70);
+  const blocks = new Set(good.map(g => g.kickoff ? Math.floor(g.kickoff.getHours()/3) : 4));
+  const coverage = clamp((blocks.size / 4) * 100);
+  const depth = clamp((good.length / 6) * 100);
+
+  const score = Math.round(best*0.35 + avg3*0.35 + coverage*0.15 + depth*0.15);
+  const tier =
+    score >= 85 ? "ALL-TIMER" :
+    score >= 75 ? "CAVE CERTIFIED" :
+    score >= 62 ? "SOLID" :
+    score >= 48 ? "BACKGROUND NOISE" : "DO YARD WORK";
+
+  return { score, tier, games: sorted };
+}
+
+
+/* ---------- 2. Reading ESPN's data ---------- */
+function parseTeam(c) {
+  const rec = (c.records && c.records[0] && c.records[0].summary) || "0-0";
+  const bits = rec.split("-");
+  const rank = c.curatedRank && c.curatedRank.current;
+  return {
+    name:   (c.team && c.team.shortDisplayName) || "?",
+    abbrev: (c.team && c.team.abbreviation) || "?",
+    logo:   c.team && c.team.logo,
+    rank:   (rank && rank <= 25) ? rank : null,
+    wins:   parseInt(bits[0]) || 0,
+    losses: parseInt(bits[1]) || 0
+  };
+}
+
+function parseSpread(odds) {
+  if (!odds) return null;
+  if (typeof odds.spread === "number") return Math.abs(odds.spread);
+  const d = odds.details;                       // e.g. "OSU -7.5" or "EVEN"
+  if (!d) return null;
+  if (/even|pk/i.test(d)) return 0;
+  const m = d.match(/-?\d+(\.\d+)?/);
+  return m ? Math.abs(parseFloat(m[0])) : null;
+}
+
+function parseGame(ev, week) {
+  const c = ev.competitions && ev.competitions[0];
+  if (!c || !c.competitors) return null;
+  const home = c.competitors.find(x => x.homeAway === "home");
+  const away = c.competitors.find(x => x.homeAway === "away");
+  if (!home || !away) return null;
+
+  const odds = c.odds && c.odds[0];
+  const bc = c.broadcasts && c.broadcasts[0];
+
+  return {
+    id: ev.id,
+    home: parseTeam(home),
+    away: parseTeam(away),
+    kickoff: ev.date ? new Date(ev.date) : null,
+    network: (bc && bc.names && bc.names[0]) || "TBD",
+    spread: parseSpread(odds),
+    overUnder: odds && typeof odds.overUnder === "number" ? odds.overUnder : null,
+    conferenceGame: !!c.conferenceCompetition,
+    neutralSite: !!c.neutralSite,
+    week: week || 1
+  };
+}
+
+
+/* ---------- 3. Dates ---------- */
+function nextDayOfWeek(dow) {                    // 6 = Sat, 0 = Sun
+  const d = new Date();
+  d.setDate(d.getDate() + ((dow - d.getDay() + 7) % 7));
+  return d;
+}
+const ymd = d => d.getFullYear()
+  + String(d.getMonth()+1).padStart(2,"0")
+  + String(d.getDate()).padStart(2,"0");
+
+
+/* ---------- 4. Fetching ---------- */
+async function getSlate(league, date) {
+  const path = league === "cfb"
+    ? "football/college-football/scoreboard?groups=80&limit=300&dates="
+    : "football/nfl/scoreboard?dates=";
+  const url = "https://site.api.espn.com/apis/site/v2/sports/" + path + ymd(date);
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("ESPN returned " + res.status);
+  const data = await res.json();
+
+  const week = (data.week && data.week.number) || 1;
+  const games = (data.events || [])
+    .map(ev => parseGame(ev, week))
+    .filter(Boolean)
+    .map(scoreGame);
+
+  return scoreSlate(games);
+}
+
+
+/* ---------- 5. Drawing the page ---------- */
+function timeStr(d) {
+  if (!d) return "TBD";
+  return d.toLocaleTimeString([], { hour:"numeric", minute:"2-digit" });
+}
+
+function renderStatus() {
+  document.getElementById("status").innerHTML =
+    '<div class="banner ' + (CAVE.open ? "open" : "closed") + '">' +
+      '<h1>' + (CAVE.open ? "CAVE IS OPEN" : "CAVE IS CLOSED") + '</h1>' +
+      '<p>' + CAVE.message + '</p>' +
+    '</div>';
+}
+
+function renderSlate(title, slate) {
+  let html = '<div class="slate"><div class="slate-head">' +
+    '<h2>' + title + '</h2><span class="score">' + slate.score + '</span></div>' +
+    '<div class="tier">' + slate.tier + '</div>';
+
+  slate.games.slice(0, 8).forEach((g, i) => {
+    const meta = [
+      timeStr(g.kickoff),
+      g.network,
+      g.spread != null ? "spread " + g.spread : null,
+      g.overUnder != null ? "O/U " + g.overUnder : null
+    ].filter(Boolean).join(" · ");
+
+    const nm = t => (t.rank ? "#" + t.rank + " " : "") + t.name;
+
+    html += '<div class="game">' +
+      '<div class="gnum">' + (i+1) + '</div>' +
+      '<div class="gmain"><div class="gteams">' +
+        nm(g.away) + " at " + nm(g.home) +
+      '</div><div class="gmeta">' + meta + '</div></div>' +
+      '<div class="gscore">' + g.score + '</div></div>';
+  });
+
+  return html + '</div>';
+}
+
+function renderTvs(games) {
+  if (!games.length) return;
+  let html = "";
+  games.slice(0,3).forEach((g, i) => {
+    html += '<div class="tv"><b>TV ' + (i+1) + '</b> — ' +
+      g.away.name + " at " + g.home.name +
+      ' <span style="opacity:.6">(' + timeStr(g.kickoff) + ", " + g.network + ')</span></div>';
+  });
+  document.getElementById("tvboard").innerHTML = html;
+}
+
+async function main() {
+  renderStatus();
+  try {
+    const sat = await getSlate("cfb", nextDayOfWeek(6));
+    const sun = await getSlate("nfl", nextDayOfWeek(0));
+    document.getElementById("out").innerHTML =
+      renderSlate("College Saturday", sat) + renderSlate("NFL Sunday", sun);
+    renderTvs(sat.games);
+  } catch (e) {
+    document.getElementById("out").innerHTML =
+      '<div class="err"><b>Couldn\'t load games.</b><br>' + e.message +
+      '<br><br>Open the browser console (F12) for details.</div>';
+  }
+}
+main();
+</script>
+</body>
+</html>
